@@ -1,16 +1,16 @@
 -- Mailroom / Mailroom.lua
 -- AceAddon entry point, namespace initialization, AceDB setup, and
--- AceConfig options registration. This is the first Core file loaded
--- after Compat.lua and establishes the addon object that all other
--- modules reference via MR.Addon.
+-- event coordination. All settings are defined in Core/Settings.lua.
+-- This file is the central hub that initializes AceDB, registers
+-- events, and delegates to modules.
 
 local AddonName, MR = ...
 
 -------------------------------------------------------------------------------
 -- Addon Object
--- Creates the main AceAddon with AceConsole (slash commands + :Print) and
--- AceEvent (event registration) mixed in. Stored on MR so every file can
--- access it without globals.
+-- Creates the main AceAddon with AceConsole (slash commands + :Print),
+-- AceEvent (event registration), and AceTimer mixed in. Stored on MR
+-- so every file can access it without globals.
 -------------------------------------------------------------------------------
 
 local Addon = LibStub("AceAddon-3.0"):NewAddon("Mailroom",
@@ -21,93 +21,96 @@ local Addon = LibStub("AceAddon-3.0"):NewAddon("Mailroom",
 MR.Addon = Addon
 
 -------------------------------------------------------------------------------
--- AceDB Defaults
--- profile: per-character UI preferences, behavior toggles, and contacts.
--- factionrealm: shared across characters on the same faction+realm,
---               used for alt tracking (gold snapshots, item lists).
+-- Inbox Cache
+-- Shared mail cache that all modules read from. Rebuilt on every
+-- MAIL_INBOX_UPDATE event. Stored on MR so modules can access it.
 -------------------------------------------------------------------------------
 
-local defaults = {
-    profile = {
-        throttleDelay     = 0.15,  -- seconds between queue operations
-        skipCOD           = false, -- if true, skips COD mail during open-all
-        autoCollect       = false, -- collect money/items immediately on mail open
-        expiryWarningDays = 3,     -- warn when mail expires within this many days
-        deleteEmpty       = true,  -- auto-delete empty read mail after collecting
-        showMinimap       = false, -- reserved for future minimap button
-        contacts          = {},    -- address book: name -> { addedAt, source }
-    },
-    factionrealm = {
-        altData = {},              -- keyed by "Name-Realm", stores gold + item snapshots
-    },
+MR.mailCache = {}
+MR.mailFrameOpen = false
+
+-- Scans all mail currently loaded in the inbox and rebuilds the cache.
+-- Called on MAIL_INBOX_UPDATE. The cache is wiped and rebuilt each time
+-- because mail indices shift as items are taken or deleted, making
+-- incremental updates unreliable.
+function MR.ScanInbox()
+    wipe(MR.mailCache)
+
+    local numItems = MR.GetInboxNumItems()
+    for i = 1, numItems do
+        local packageIcon, stationeryIcon, sender, subject, money,
+              CODAmount, daysLeft, hasItem, wasRead, wasReturned,
+              textCreated, canReply, isGM = MR.GetInboxHeaderInfo(i)
+
+        MR.mailCache[i] = {
+            index        = i,
+            sender       = sender or "Unknown",
+            subject      = subject or "",
+            money        = money or 0,
+            CODAmount    = CODAmount or 0,
+            daysLeft     = daysLeft or 0,
+            hasItem      = hasItem,
+            wasRead      = wasRead,
+            wasReturned  = wasReturned,
+            isGM         = isGM,
+            packageIcon  = packageIcon,
+        }
+    end
+
+    return MR.mailCache
+end
+
+-------------------------------------------------------------------------------
+-- Mail Type Classification
+-- Identifies what kind of mail an item is by examining sender and subject.
+-- Used by OpenAll to apply per-type filters. Returns a string type tag.
+-------------------------------------------------------------------------------
+
+-- Known AH sender names across clients.
+local AH_SENDERS = {
+    ["Auction House"] = true,
+    ["Alliance Auction House"] = true,
+    ["Horde Auction House"] = true,
+    ["Booty Bay Auction House"] = true,
+    ["Goblin Auction House"] = true,
 }
 
+-- The Postmaster sender name.
+local POSTMASTER_SENDER = "The Postmaster"
+
+-- Classifies a cached mail entry by type.
+-- @param info (table) A mail info table from MR.mailCache.
+-- @return (string) One of: "ah", "postmaster", "cod", "player", "system".
+function MR.ClassifyMail(info)
+    if info.CODAmount > 0 then
+        return "cod"
+    elseif AH_SENDERS[info.sender] then
+        return "ah"
+    elseif info.sender == POSTMASTER_SENDER then
+        return "postmaster"
+    elseif info.wasReturned or (not info.isGM and info.sender ~= "Unknown") then
+        return "player"
+    else
+        return "system"
+    end
+end
+
 -------------------------------------------------------------------------------
--- AceConfig Options Table
--- Defines all user-facing settings in one place. Rendered by AceConfig
--- into the Blizzard Interface Options panel and via /mailroom config.
+-- Bag Space Utility
+-- Returns total free bag slots across all bags. Used by OpenAll to
+-- enforce the minimum free slots threshold.
 -------------------------------------------------------------------------------
 
-local options = {
-    name = "Mailroom",
-    type = "group",
-    args = {
-        general = {
-            name = "General",
-            type = "group",
-            order = 1,
-            inline = true,
-            args = {
-                throttleDelay = {
-                    name = "Throttle Delay",
-                    desc = "Seconds between mail operations. Lower is faster but risks silent failures. 0.15 is safe for most connections.",
-                    type = "range",
-                    min = 0.05,
-                    max = 1.0,
-                    step = 0.05,
-                    order = 1,
-                    get = function() return Addon.db.profile.throttleDelay end,
-                    set = function(_, val) Addon.db.profile.throttleDelay = val end,
-                },
-                skipCOD = {
-                    name = "Skip COD Mail",
-                    desc = "When collecting all mail, skip any mail that requires a COD payment instead of prompting.",
-                    type = "toggle",
-                    order = 2,
-                    get = function() return Addon.db.profile.skipCOD end,
-                    set = function(_, val) Addon.db.profile.skipCOD = val end,
-                },
-                autoCollect = {
-                    name = "Auto-Collect on Open",
-                    desc = "Automatically start collecting all mail when you open the mailbox.",
-                    type = "toggle",
-                    order = 3,
-                    get = function() return Addon.db.profile.autoCollect end,
-                    set = function(_, val) Addon.db.profile.autoCollect = val end,
-                },
-                deleteEmpty = {
-                    name = "Delete Empty Mail",
-                    desc = "Automatically delete mail after all attachments and gold have been collected.",
-                    type = "toggle",
-                    order = 4,
-                    get = function() return Addon.db.profile.deleteEmpty end,
-                    set = function(_, val) Addon.db.profile.deleteEmpty = val end,
-                },
-                expiryWarningDays = {
-                    name = "Expiry Warning (Days)",
-                    desc = "Show a warning when mail expires within this many days.",
-                    type = "range",
-                    min = 1,
-                    max = 30,
-                    step = 1,
-                    order = 5,
-                    get = function() return Addon.db.profile.expiryWarningDays end,
-                    set = function(_, val) Addon.db.profile.expiryWarningDays = val end,
-                },
-            },
-        },
-    },
-}
+-- Counts total free bag slots across all standard bags.
+-- @return (number) Total free slots.
+function MR.GetFreeBagSlots()
+    local free = 0
+    for bag = 0, MR.NUM_BAG_SLOTS do
+        local slots = MR.GetContainerNumFreeSlots(bag)
+        free = free + (slots or 0)
+    end
+    return free
+end
 
 -------------------------------------------------------------------------------
 -- Lifecycle Callbacks
@@ -116,8 +119,9 @@ local options = {
 -- OnInitialize fires once when the addon is first loaded (before PLAYER_LOGIN).
 -- Sets up the saved variables database and registers configuration UI.
 function Addon:OnInitialize()
-    self.db = LibStub("AceDB-3.0"):New("MailroomDB", defaults, true)
+    self.db = LibStub("AceDB-3.0"):New("MailroomDB", MR.defaults, true)
 
+    local options = MR.Settings:BuildOptions()
     LibStub("AceConfig-3.0"):RegisterOptionsTable("Mailroom", options)
     LibStub("AceConfigDialog-3.0"):AddToBlizOptions("Mailroom", "Mailroom")
 
@@ -126,29 +130,95 @@ function Addon:OnInitialize()
 end
 
 -- OnEnable fires after PLAYER_LOGIN when the addon becomes active.
--- Registers events and kicks off any startup logic that requires
--- the game world to be available (event registration, alt data init).
+-- Registers core events and initializes alt tracking.
 function Addon:OnEnable()
-    MR.MailFrame:RegisterEvents()
+    -- Core mail frame events.
+    self:RegisterEvent("MAIL_SHOW", "OnMailShow")
+    self:RegisterEvent("MAIL_CLOSED", "OnMailClosed")
+    self:RegisterEvent("MAIL_INBOX_UPDATE", "OnMailInboxUpdate")
+
+    -- Alt data events.
+    self:RegisterEvent("PLAYER_MONEY", function()
+        MR.AltData:UpdateGold()
+    end)
     MR.AltData:OnLogin()
 
     self:Print("Mailroom loaded. Type /mr help for commands.")
 end
 
 -------------------------------------------------------------------------------
+-- Core Event Handlers
+-- These coordinate all modules. Individual modules hook into these
+-- via their own MR.ModuleName:OnMailShow() etc. methods.
+-------------------------------------------------------------------------------
+
+-- MAIL_SHOW: player opened a mailbox.
+function Addon:OnMailShow()
+    MR.mailFrameOpen = true
+    MR.ScanInbox()
+
+    -- Create the settings button on the mail frame.
+    MR.Settings:CreateMailFrameButton()
+
+    -- Notify all modules that have an OnMailShow handler.
+    local modules = { "OpenAll", "BulkSelect", "AddressBook", "QuickActions",
+                      "CarbonCopy", "DoNotWant", "Forward", "QuickAttach",
+                      "Rake", "TradeBlock", "EnhancedUI", "MailBag",
+                      "Analytics", "Snooze", "Templates", "PendingIncome",
+                      "ExpiryTicker", "SoundDesign" }
+    for _, name in ipairs(modules) do
+        local mod = MR[name]
+        if mod and mod.OnMailShow then
+            mod:OnMailShow()
+        end
+    end
+
+    -- Update alt data with current mailbox contents.
+    MR.AltData:UpdateMailSnapshot(MR.mailCache)
+end
+
+-- MAIL_CLOSED: player closed the mailbox.
+function Addon:OnMailClosed()
+    MR.mailFrameOpen = false
+    MR.Queue.Clear()
+
+    -- Notify all modules.
+    local modules = { "OpenAll", "BulkSelect", "AddressBook", "QuickActions",
+                      "CarbonCopy", "DoNotWant", "Forward", "QuickAttach",
+                      "Rake", "TradeBlock", "EnhancedUI", "MailBag",
+                      "Analytics", "Snooze", "Templates", "PendingIncome",
+                      "ExpiryTicker", "SoundDesign" }
+    for _, name in ipairs(modules) do
+        local mod = MR[name]
+        if mod and mod.OnMailClosed then
+            mod:OnMailClosed()
+        end
+    end
+
+    -- Final alt data snapshot.
+    MR.AltData:UpdateMailSnapshot(MR.mailCache)
+end
+
+-- MAIL_INBOX_UPDATE: inbox contents changed while mailbox is open.
+function Addon:OnMailInboxUpdate()
+    if not MR.mailFrameOpen then return end
+    MR.ScanInbox()
+
+    -- Notify modules that care about inbox refresh.
+    local modules = { "OpenAll", "BulkSelect", "DoNotWant", "EnhancedUI", "MailBag" }
+    for _, name in ipairs(modules) do
+        local mod = MR[name]
+        if mod and mod.OnMailInboxUpdate then
+            mod:OnMailInboxUpdate()
+        end
+    end
+end
+
+-------------------------------------------------------------------------------
 -- Slash Command Handler
--- Routes /mailroom and /mr commands to subcommand handlers.
 -------------------------------------------------------------------------------
 
 -- Handles slash command input.
--- Supported subcommands:
---   (none) or "config"  — opens the settings panel
---   "help"              — prints available commands
---   "alts"              — shows alt gold overview
---   "address add <name>"  — adds a contact
---   "address remove <name>" — removes a contact
---   "address list"      — lists all contacts
---   "collect"           — triggers collect-all (if mailbox is open)
 -- @param input (string) The text after /mailroom or /mr, trimmed.
 function Addon:OnSlashCommand(input)
     local cmd, rest = self:GetArgs(input, 2, nil, input)
@@ -171,10 +241,10 @@ function Addon:OnSlashCommand(input)
     elseif cmd == "address" then
         local subcmd, name = self:GetArgs(rest or "", 2)
         if subcmd == "add" and name and name ~= "" then
-            MR.AddressBook:Add(name)
+            MR.AddressBook:AddContact(name, "manual")
             self:Print("Added " .. name .. " to address book.")
         elseif subcmd == "remove" and name and name ~= "" then
-            MR.AddressBook:Remove(name)
+            MR.AddressBook:RemoveContact(name)
             self:Print("Removed " .. name .. " from address book.")
         elseif subcmd == "list" then
             self:ShowAddressBook()
@@ -183,8 +253,8 @@ function Addon:OnSlashCommand(input)
         end
 
     elseif cmd == "collect" then
-        if MR.MailFrame:IsOpen() then
-            MR.Inbox:CollectAll()
+        if MR.mailFrameOpen then
+            MR.OpenAll:CollectAll()
         else
             self:Print("You need to open a mailbox first.")
         end
@@ -199,7 +269,6 @@ end
 -------------------------------------------------------------------------------
 
 -- Prints an overview of all tracked alts and their gold totals.
--- Shows character name, on-hand gold, and gold sitting in their mailbox.
 function Addon:ShowAlts()
     local altData = MR.AltData:GetAll()
     local currentKey = MR.AltData:GetCurrentKey()
@@ -228,11 +297,10 @@ end
 
 -- Prints all contacts in the address book.
 function Addon:ShowAddressBook()
-    local contacts = MR.AddressBook:GetAll()
+    local contacts = MR.Addon.db.profile.contacts or {}
     local count = 0
 
     self:Print("--- Address Book ---")
-    -- Sort contacts alphabetically for display.
     local sorted = {}
     for name, _ in pairs(contacts) do
         table.insert(sorted, name)
