@@ -154,12 +154,77 @@ Each character the player logs into gets its own independent settings profile by
 ---
 
 ### Settings
-A configuration panel accessible directly from the mailbox without leaving the game or opening a separate window.
+A fully custom settings window — NOT a default AceConfig panel. Built using WoW's native Frame API with a handcrafted layout. AceConfig is used only for data storage and defaults, not for rendering the UI.
 
-- A small arrow button at the top-left of the Blizzard mail frame opens the Mailroom settings panel
-- The panel is organized by module, each with its own section and a master on/off toggle
-- All settings apply immediately on change — no UI reload required
-- Typing `/mailroom` or `/mr` in chat opens the same panel from anywhere in the game
+#### Window Structure
+
+The settings window is a custom resizable Frame with three zones:
+
+**1. Title bar** — dark gradient background, "Mailroom — Settings" in gold uppercase text, a close button top-right. Matches WoW's general dark UI aesthetic using colors from the game's own texture palette (dark browns, golds).
+
+**2. Body** — split horizontally into a left sidebar and a right content panel.
+
+**3. Footer** — thin bar at the bottom with a hint text on the left (`Green dot = module enabled · /mr to open anywhere`) and a Close button on the right.
+
+#### Sidebar Navigation
+
+The sidebar replaces the tab row entirely. Modules are grouped into four categories with section labels:
+
+- **General**: Core, Enhanced UI, Sound
+- **Inbox**: Open All, Bulk Select, Quick Actions, Do Not Want, MailBag, Snooze
+- **Sending**: Address Book, Quick Attach, Forward, Carbon Copy, Templates
+- **Tracking**: Rake, Analytics, Pending Income, Expiry Ticker, Trade Block
+
+Each nav item has:
+- A small 6px dot on the left — green if the module is enabled, dark brown if disabled
+- A left border accent (gold/amber) on the currently selected item
+- Subtle background highlight on hover and active states
+- Font in WoW's standard UI gold-tan color scheme
+
+Clicking a nav item loads that module's settings into the content panel on the right without closing or reloading the window.
+
+#### Content Panel
+
+Each module's panel follows a consistent layout:
+
+- **Module header** — module name in larger gold text, a one-line description below it in muted text, and a master enable/disable toggle pill on the right. A horizontal rule separates the header from settings below.
+- **Setting groups** — related settings are grouped into bordered sections with a small uppercase section label (e.g., "Queue", "Filters", "Display"). Each group has a slightly darker background to visually separate it.
+- **Setting rows** — each row has a label on the left (with optional muted description below it) and a control on the right. Controls by type:
+  - Boolean options: a checkbox (14px, styled to match WoW's UI)
+  - On/off module toggle: a pill toggle (green = on)
+  - Numeric values: a stepper with − and + buttons flanking the current value
+  - Text values: a short EditBox
+  - Dropdown selections: a UIDropDownMenu-style control
+
+#### Visual Style
+
+The window uses WoW's dark parchment color palette throughout — no bright colors, no white backgrounds. Key values:
+
+```lua
+-- Color constants for the settings window (defined in UI/SettingsWindow.lua)
+MR.Colors = {
+    windowBg      = {0.10, 0.07, 0.03, 1.0},   -- very dark brown
+    sidebarBg     = {0.06, 0.04, 0.02, 1.0},   -- darker sidebar
+    titlebarBg    = {0.18, 0.12, 0.04, 1.0},   -- mid brown
+    borderGold    = {0.48, 0.38, 0.19, 1.0},   -- gold border
+    textGold      = {0.91, 0.78, 0.44, 1.0},   -- bright gold text
+    textMuted     = {0.42, 0.34, 0.19, 1.0},   -- muted label text
+    accentGold    = {0.78, 0.56, 0.19, 1.0},   -- active nav accent
+    dotEnabled    = {0.23, 0.48, 0.23, 1.0},   -- green enabled dot
+    dotDisabled   = {0.29, 0.22, 0.09, 1.0},   -- dark brown disabled dot
+    groupBg       = {0.07, 0.05, 0.02, 1.0},   -- setting group background
+}
+```
+
+#### Implementation Notes
+
+- Build the window in `UI/SettingsWindow.lua` as a standalone custom frame — do NOT use `AceGUI:Create("Frame")` for the outer window
+- Use `AceGUI` widgets only for individual controls inside the content panel where appropriate (EditBox, Slider, etc.)
+- The window is shown/hidden, never destroyed and recreated
+- Content panels per module are created once and cached, then shown/hidden as the player navigates
+- `/mailroom` and `/mr` both call `MR.Settings:Toggle()`
+- The settings button on the mail frame is a small styled Button frame, not a default Blizzard widget
+- All settings apply immediately on change via AceDB — no apply/cancel/save buttons needed
 
 ---
 

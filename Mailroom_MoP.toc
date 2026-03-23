@@ -12,6 +12,7 @@ Core\Mailroom.lua
 Core\MailQueue.lua
 Core\AltData.lua
 Core\Settings.lua
+UI\SettingsWindow.lua
 Modules\OpenAll.lua
 Modules\BulkSelect.lua
 Modules\AddressBook.lua

@@ -121,6 +121,8 @@ end
 function Addon:OnInitialize()
     self.db = LibStub("AceDB-3.0"):New("MailroomDB", MR.defaults, true)
 
+    -- AceConfig is still used for data storage and the Blizzard options
+    -- fallback, but the primary UI is the custom SettingsWindow.
     local options = MR.Settings:BuildOptions()
     LibStub("AceConfig-3.0"):RegisterOptionsTable("Mailroom", options)
     LibStub("AceConfigDialog-3.0"):AddToBlizOptions("Mailroom", "Mailroom")
@@ -224,7 +226,7 @@ function Addon:OnSlashCommand(input)
     local cmd, rest = self:GetArgs(input, 2, nil, input)
 
     if cmd == "config" or cmd == "" or cmd == nil then
-        LibStub("AceConfigDialog-3.0"):Open("Mailroom")
+        MR.Settings:Toggle()
 
     elseif cmd == "help" then
         self:Print("Mailroom Commands:")
