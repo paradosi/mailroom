@@ -144,12 +144,47 @@ An alternative inbox view that displays all mail attachments and gold as a grid 
 ---
 
 ### Per-Character Profiles
-Each character the player logs into gets its own independent settings profile by default.
+Each character gets its own independent settings profile by default. The Profiles panel is a dedicated nav item in the Settings sidebar under General.
 
-- Profile mode defaults to per-character so settings don't bleed between alts
-- Players can create shared profiles and assign multiple characters to them via the standard AceDB profile interface
-- Profile switching is accessible from the settings panel inside the mailbox
-- All module states, thresholds, and preferences belong to the active profile
+#### Profile Panel UI
+
+The Profiles content panel shows:
+
+- **Active profile** — displays the current character name and realm (e.g. "Kismit — Dreamscythe") as a read-only label. This is the profile currently in use.
+- **Profile mode toggle** — a dropdown or set of radio-style buttons with two options:
+  - **Per character** (default) — each character that logs in automatically gets their own profile named "CharacterName — Realm"
+  - **Shared** — all characters on this account use the same profile
+- **Profile list** — a scrollable list of all saved profiles. Each row shows the profile name and a count of characters using it. Actions per row:
+  - **Rename** — inline edit the profile name
+  - **Delete** — remove the profile (disabled if it is the currently active profile or the last remaining profile)
+  - **Set active** — switch the current character to this profile
+- **New profile button** — creates a blank profile with a prompted name, then optionally copies settings from the current profile as a starting point
+- **Copy from...** — a dropdown to copy all settings from another saved profile into the current one (with a confirmation prompt before overwriting)
+- **Reset to defaults** — resets the active profile to factory defaults (with confirmation prompt)
+
+#### AceDB Integration
+
+```lua
+-- Profile is set in OnInitialize
+MR.Addon.db = LibStub("AceDB-3.0"):New("MailroomDB", defaults, true)
+-- true = use character name as default profile key
+
+-- Switching profiles programmatically
+MR.Addon.db:SetProfile(profileName)
+
+-- Listing available profiles
+local profiles = MR.Addon.db:GetProfiles()
+
+-- Copying a profile
+MR.Addon.db:CopyProfile(sourceProfileName)
+
+-- Deleting a profile
+MR.Addon.db:DeleteProfile(profileName)
+```
+
+- Profile changes take effect immediately — no reload required
+- When a new character logs in for the first time, AceDB automatically creates a profile named "CharacterName - RealmName"
+- The Profiles panel must fire `MR.Addon.db.callbacks:Fire("OnProfileChanged")` after any profile switch so all modules can refresh their cached settings
 
 ---
 
@@ -170,7 +205,7 @@ The settings window is a custom resizable Frame with three zones:
 
 The sidebar replaces the tab row entirely. Modules are grouped into four categories with section labels:
 
-- **General**: Core, Enhanced UI, Sound
+- **General**: Core, Profiles, Enhanced UI, Sound
 - **Inbox**: Open All, Bulk Select, Quick Actions, Do Not Want, MailBag, Snooze
 - **Sending**: Address Book, Quick Attach, Forward, Carbon Copy, Templates
 - **Tracking**: Rake, Analytics, Pending Income, Expiry Ticker, Trade Block
@@ -198,22 +233,38 @@ Each module's panel follows a consistent layout:
 
 #### Visual Style
 
-The window uses WoW's dark parchment color palette throughout — no bright colors, no white backgrounds. Key values:
+The window takes inspiration from ElvUI's aesthetic — dark, flat, minimal, professional — but with rounded corners throughout. No WoW parchment/gold color palette. Clean near-black surfaces with a single configurable accent color.
+
+Key design rules:
+- Outer window: `border-radius` of ~8px, `border: 1px solid` subtle dark border, `overflow: hidden` to clip children
+- A thin 3px accent color bar runs across the very top of the window (above the title bar) — defaults to a muted cyan/blue
+- Title bar: slightly lighter dark background, addon name in the accent color, uppercase spaced lettering
+- Window control buttons (minimize, close) are small circles in the title bar right corner
+- Sidebar nav items: rounded on the right side only (`border-radius: 0 6px 6px 0`), with a left border accent on the active item
+- All interactive controls (steppers, dropdowns, checkboxes, toggles, buttons) use `border-radius: 6px`
+- Section labels inside content panels: accent color, uppercase, spaced, with a thin bottom border separator
+- Enabled badge on module header: pill shape (`border-radius: 10px`), green tint
+- Footer close button: rounded, dark, subtle
 
 ```lua
 -- Color constants for the settings window (defined in UI/SettingsWindow.lua)
 MR.Colors = {
-    windowBg      = {0.10, 0.07, 0.03, 1.0},   -- very dark brown
-    sidebarBg     = {0.06, 0.04, 0.02, 1.0},   -- darker sidebar
-    titlebarBg    = {0.18, 0.12, 0.04, 1.0},   -- mid brown
-    borderGold    = {0.48, 0.38, 0.19, 1.0},   -- gold border
-    textGold      = {0.91, 0.78, 0.44, 1.0},   -- bright gold text
-    textMuted     = {0.42, 0.34, 0.19, 1.0},   -- muted label text
-    accentGold    = {0.78, 0.56, 0.19, 1.0},   -- active nav accent
-    dotEnabled    = {0.23, 0.48, 0.23, 1.0},   -- green enabled dot
-    dotDisabled   = {0.29, 0.22, 0.09, 1.0},   -- dark brown disabled dot
-    groupBg       = {0.07, 0.05, 0.02, 1.0},   -- setting group background
+    windowBg      = {0.067, 0.067, 0.071, 1.0},  -- #111112 near-black
+    sidebarBg     = {0.051, 0.051, 0.055, 1.0},  -- #0d0d0e darker sidebar
+    titlebarBg    = {0.102, 0.102, 0.118, 1.0},  -- #1a1a1e title bar
+    borderDark    = {0.165, 0.165, 0.180, 1.0},  -- #2a2a2e subtle border
+    accentCyan    = {0.310, 0.765, 0.969, 1.0},  -- #4fc3f7 default accent
+    textPrimary   = {0.910, 0.910, 0.925, 1.0},  -- #e8e8ec bright text
+    textMuted     = {0.533, 0.533, 0.565, 1.0},  -- #888890 muted text
+    textDim       = {0.267, 0.267, 0.284, 1.0},  -- #444448 dim/desc text
+    rowBg         = {0.086, 0.086, 0.094, 1.0},  -- #161618 row/header bg
+    inputBg       = {0.078, 0.078, 0.086, 1.0},  -- #141416 input bg
+    dotEnabled    = {0.298, 0.686, 0.314, 1.0},  -- #4caf50 green dot
+    dotDisabled   = {0.165, 0.165, 0.188, 1.0},  -- #2a2a30 dark dot
+    enabledBadge  = {0.102, 0.165, 0.102, 1.0},  -- #1a2a1a badge bg
 }
+-- Accent color is user-configurable and stored in AceDB profile
+-- All accent uses pull from MR.Addon.db.profile.accentColor at render time
 ```
 
 #### Implementation Notes

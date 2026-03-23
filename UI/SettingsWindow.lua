@@ -1,8 +1,10 @@
 -- Mailroom / SettingsWindow.lua
 -- Fully custom settings window built with WoW's native Frame API.
+-- ElvUI-inspired dark flat design with configurable accent color.
 -- Provides a sidebar-navigated, data-driven module configuration UI
 -- without any dependency on AceGUI or AceConfigDialog. All settings
 -- read and write directly to MR.Addon.db.profile for instant effect.
+-- The Profiles panel integrates with AceDB for profile management.
 
 local AddonName, MR = ...
 
@@ -16,21 +18,25 @@ MR.Settings = MR.Settings or {}
 
 -------------------------------------------------------------------------------
 -- Color Constants
--- Warm, parchment-inspired palette used throughout the settings window.
--- All colors are RGBA tables suitable for SetColorTexture / SetTextColor.
+-- Dark, flat, ElvUI-inspired palette. Near-black surfaces with a single
+-- configurable accent color (cyan by default). All colors are RGBA tables
+-- suitable for SetColorTexture / SetTextColor / SetBackdropColor.
 -------------------------------------------------------------------------------
 
 MR.Colors = {
-    windowBg      = {0.10, 0.07, 0.03, 1.0},  -- main body background
-    sidebarBg     = {0.06, 0.04, 0.02, 1.0},  -- left nav panel
-    titlebarBg    = {0.18, 0.12, 0.04, 1.0},  -- top title strip
-    borderGold    = {0.48, 0.38, 0.19, 1.0},  -- outer frame border
-    textGold      = {0.91, 0.78, 0.44, 1.0},  -- primary text color
-    textMuted     = {0.42, 0.34, 0.19, 1.0},  -- secondary / hint text
-    accentGold    = {0.78, 0.56, 0.19, 1.0},  -- selected item left bar
-    dotEnabled    = {0.23, 0.48, 0.23, 1.0},  -- green dot: module on
-    dotDisabled   = {0.29, 0.22, 0.09, 1.0},  -- brown dot: module off
-    groupBg       = {0.07, 0.05, 0.02, 1.0},  -- grouped-section backdrop
+    windowBg      = {0.067, 0.067, 0.071, 1.0},  -- #111112 near-black body
+    sidebarBg     = {0.051, 0.051, 0.055, 1.0},  -- #0d0d0e darker sidebar
+    titlebarBg    = {0.102, 0.102, 0.118, 1.0},  -- #1a1a1e title bar strip
+    borderDark    = {0.165, 0.165, 0.180, 1.0},  -- #2a2a2e subtle border
+    accentCyan    = {0.310, 0.765, 0.969, 1.0},  -- #4fc3f7 default accent
+    textPrimary   = {0.910, 0.910, 0.925, 1.0},  -- #e8e8ec bright text
+    textMuted     = {0.533, 0.533, 0.565, 1.0},  -- #888890 muted text
+    textDim       = {0.267, 0.267, 0.284, 1.0},  -- #444448 dim text
+    rowBg         = {0.086, 0.086, 0.094, 1.0},  -- #161618 row bg
+    inputBg       = {0.078, 0.078, 0.086, 1.0},  -- #141416 input bg
+    dotEnabled    = {0.298, 0.686, 0.314, 1.0},  -- #4caf50 green dot
+    dotDisabled   = {0.165, 0.165, 0.188, 1.0},  -- #2a2a30 dark dot
+    enabledBadge  = {0.102, 0.165, 0.102, 1.0},  -- #1a2a1a badge bg
 }
 
 -------------------------------------------------------------------------------
@@ -39,12 +45,14 @@ MR.Colors = {
 -- and individual settings. The UI is generated entirely from this table.
 --
 -- Supported setting types:
---   "toggle"  — boolean checkbox
---   "range"   — numeric stepper with +/- buttons
---   "input"   — single-line text edit box
+--   "toggle"  -- boolean checkbox
+--   "range"   -- numeric stepper with +/- buttons
+--   "input"   -- single-line text edit box
 --
 -- enabledKey is the db.profile key for the master toggle. nil means
--- the module is always active (e.g., Core).
+-- the module is always active (e.g., Core). The Profiles entry has
+-- enabledKey = nil and uses custom panel building instead of data-driven
+-- settings (its settings table is empty).
 -------------------------------------------------------------------------------
 
 local MODULE_DEFS = {
@@ -58,8 +66,16 @@ local MODULE_DEFS = {
         category = "General",
         enabledKey = nil,
         settings = {
-            { key = "throttleDelay", name = "Throttle Delay", desc = "Seconds between mail operations.", type = "range", min = 0.05, max = 1.0, step = 0.05 },
+            { key = "throttleDelay", name = "Throttle Delay", desc = "Seconds between mail operations. Lower is faster but risks silent failures.", type = "range", min = 0.05, max = 1.0, step = 0.05 },
         },
+    },
+    {
+        key = "profiles",
+        name = "Profiles",
+        desc = "Manage AceDB profiles. Switch, copy, create, or reset settings profiles.",
+        category = "General",
+        enabledKey = nil,
+        settings = {},
     },
     {
         key = "enhancedUI",
@@ -276,6 +292,7 @@ local WINDOW_MIN_W       = 600
 local WINDOW_MIN_H       = 400
 local WINDOW_MAX_W       = 1000
 local WINDOW_MAX_H       = 800
+local ACCENT_TOP_HEIGHT  = 3       -- thin accent bar across very top
 local TITLEBAR_HEIGHT    = 32
 local FOOTER_HEIGHT      = 28
 local SIDEBAR_WIDTH      = 170
@@ -286,10 +303,11 @@ local ACCENT_BAR_WIDTH   = 3
 local CONTENT_PAD        = 16
 local HEADER_HEIGHT      = 50
 local ROW_HEIGHT         = 28
-local TOGGLE_PILL_W      = 40
-local TOGGLE_PILL_H      = 20
-local STEPPER_BTN_SIZE   = 18
+local TOGGLE_PILL_W      = 44
+local TOGGLE_PILL_H      = 22
+local STEPPER_BTN_SIZE   = 22
 local STEPPER_VALUE_W    = 50
+local CLOSE_BTN_SIZE     = 20
 
 -------------------------------------------------------------------------------
 -- Forward Declarations
@@ -298,10 +316,11 @@ local STEPPER_VALUE_W    = 50
 local mainFrame           -- the top-level window frame
 local sidebarFrame        -- left nav panel
 local contentFrame        -- right panel container
-local navItems = {}       -- { [moduleKey] = { button, dot, accent } }
+local navItems = {}       -- { [moduleKey] = { button, dot, accent, label } }
 local contentPanels = {}  -- { [moduleKey] = frame }  created lazily
 local selectedModule      -- currently selected module key string
 local BuildContentPanel   -- forward declaration; defined after row builders
+local BuildProfilesPanel  -- forward declaration; custom profiles panel builder
 
 -------------------------------------------------------------------------------
 -- Utility: Backdrop Helper
@@ -357,10 +376,100 @@ local function CreateSolidBg(frame, r, g, b, a)
 end
 
 -------------------------------------------------------------------------------
+-- Utility: Styled Dark Button
+-- A flat dark button with subtle border, used for footer Close button
+-- and profile management buttons. Avoids the Blizzard gold standard
+-- template to stay consistent with the dark theme.
+-------------------------------------------------------------------------------
+
+-- Creates a dark flat button with hover and press feedback.
+-- @param parent (Frame) The parent frame.
+-- @param width (number) Button width.
+-- @param height (number) Button height.
+-- @param text (string) Button label text.
+-- @return (Button) The styled button.
+local function CreateDarkButton(parent, width, height, text)
+    local btn = CreateBackdropFrame("Button", nil, parent)
+    btn:SetSize(width, height)
+
+    -- Track background with subtle border
+    btn:SetBackdrop({
+        bgFile   = "Interface\\Buttons\\WHITE8X8",
+        edgeFile = "Interface\\Buttons\\WHITE8X8",
+        edgeSize = 1,
+        insets   = { left = 0, right = 0, top = 0, bottom = 0 },
+    })
+    btn:SetBackdropColor(0.12, 0.12, 0.13, 1.0)
+    btn:SetBackdropBorderColor(MR.Colors.borderDark[1], MR.Colors.borderDark[2],
+        MR.Colors.borderDark[3], MR.Colors.borderDark[4])
+
+    local label = btn:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+    label:SetPoint("CENTER", btn, "CENTER", 0, 0)
+    label:SetText(text)
+    label:SetTextColor(unpack(MR.Colors.textPrimary))
+    btn._label = label
+
+    -- Hover feedback: lighten background slightly.
+    btn:SetScript("OnEnter", function(self)
+        self:SetBackdropColor(0.16, 0.16, 0.18, 1.0)
+    end)
+    btn:SetScript("OnLeave", function(self)
+        self:SetBackdropColor(0.12, 0.12, 0.13, 1.0)
+    end)
+
+    -- Press feedback: darken background.
+    btn:SetScript("OnMouseDown", function(self)
+        self:SetBackdropColor(0.08, 0.08, 0.09, 1.0)
+    end)
+    btn:SetScript("OnMouseUp", function(self)
+        self:SetBackdropColor(0.16, 0.16, 0.18, 1.0)
+    end)
+
+    return btn
+end
+
+-------------------------------------------------------------------------------
+-- Utility: Styled Dark EditBox
+-- A flat dark input field with subtle border matching the dark theme.
+-------------------------------------------------------------------------------
+
+-- Creates a dark-themed EditBox without the default Blizzard template styling.
+-- @param parent (Frame) Parent frame.
+-- @param width (number) EditBox width.
+-- @param height (number) EditBox height.
+-- @return (EditBox) The styled edit box.
+local function CreateDarkEditBox(parent, width, height)
+    local container = CreateBackdropFrame("Frame", nil, parent)
+    container:SetSize(width, height)
+    container:SetBackdrop({
+        bgFile   = "Interface\\Buttons\\WHITE8X8",
+        edgeFile = "Interface\\Buttons\\WHITE8X8",
+        edgeSize = 1,
+        insets   = { left = 0, right = 0, top = 0, bottom = 0 },
+    })
+    container:SetBackdropColor(MR.Colors.inputBg[1], MR.Colors.inputBg[2],
+        MR.Colors.inputBg[3], MR.Colors.inputBg[4])
+    container:SetBackdropBorderColor(MR.Colors.borderDark[1], MR.Colors.borderDark[2],
+        MR.Colors.borderDark[3], MR.Colors.borderDark[4])
+
+    local editBox = CreateFrame("EditBox", nil, container)
+    editBox:SetPoint("TOPLEFT", container, "TOPLEFT", 6, -2)
+    editBox:SetPoint("BOTTOMRIGHT", container, "BOTTOMRIGHT", -6, 2)
+    editBox:SetAutoFocus(false)
+    editBox:SetFontObject("GameFontNormalSmall")
+    editBox:SetTextColor(unpack(MR.Colors.textPrimary))
+
+    -- Store the container so callers can position it.
+    editBox._container = container
+
+    return editBox
+end
+
+-------------------------------------------------------------------------------
 -- Main Window Construction
--- Builds the top-level frame, title bar, sidebar, content area, and footer.
--- Called once on first Toggle/Show; the frame is then reused by showing
--- and hiding.
+-- Builds the top-level frame, accent bar, title bar, sidebar, content
+-- area, and footer. Called once on first Toggle/Show; the frame is then
+-- reused by showing and hiding.
 -------------------------------------------------------------------------------
 
 -- Builds the entire settings window. Called only once.
@@ -384,12 +493,12 @@ local function BuildMainFrame()
         f:SetMaxResize(WINDOW_MAX_W, WINDOW_MAX_H)
     end
 
-    -- Main background
+    -- Main background — near-black
     CreateSolidBg(f, unpack(MR.Colors.windowBg))
 
-    -- 1px gold border around the entire window
+    -- 1px subtle border around the entire window
     local borderSize = 1
-    local bc = MR.Colors.borderGold
+    local bc = MR.Colors.borderDark
 
     local borderTop = f:CreateTexture(nil, "BORDER")
     borderTop:SetColorTexture(bc[1], bc[2], bc[3], bc[4])
@@ -415,6 +524,15 @@ local function BuildMainFrame()
     borderRight:SetPoint("BOTTOMRIGHT", f, "BOTTOMRIGHT", 0, 0)
     borderRight:SetWidth(borderSize)
 
+    -- 3px accent color bar across the very top of the window.
+    -- This is the signature visual element — a thin cyan strip that
+    -- immediately communicates the dark theme's accent color.
+    local accentBar = f:CreateTexture(nil, "ARTWORK")
+    accentBar:SetColorTexture(unpack(MR.Colors.accentCyan))
+    accentBar:SetPoint("TOPLEFT", f, "TOPLEFT", borderSize, -borderSize)
+    accentBar:SetPoint("TOPRIGHT", f, "TOPRIGHT", -borderSize, -borderSize)
+    accentBar:SetHeight(ACCENT_TOP_HEIGHT)
+
     -- Escape key closes the window via Blizzard's special frame mechanism.
     table.insert(UISpecialFrames, "MailroomSettingsWindow")
 
@@ -423,7 +541,8 @@ end
 
 -------------------------------------------------------------------------------
 -- Title Bar
--- Dark gradient strip at the top with "MAILROOM" in gold and a close button.
+-- Slightly lighter dark strip below the accent bar with "MAILROOM" in
+-- accent color (uppercase, spaced lettering) and a circular close button.
 -------------------------------------------------------------------------------
 
 -- Builds the title bar region.
@@ -431,33 +550,60 @@ end
 -- @return (Frame) The title bar frame.
 local function BuildTitleBar(parent)
     local bar = CreateFrame("Frame", nil, parent)
-    bar:SetPoint("TOPLEFT", parent, "TOPLEFT", 1, -1)
-    bar:SetPoint("TOPRIGHT", parent, "TOPRIGHT", -1, -1)
+    bar:SetPoint("TOPLEFT", parent, "TOPLEFT", 1, -(1 + ACCENT_TOP_HEIGHT))
+    bar:SetPoint("TOPRIGHT", parent, "TOPRIGHT", -1, -(1 + ACCENT_TOP_HEIGHT))
     bar:SetHeight(TITLEBAR_HEIGHT)
 
     CreateSolidBg(bar, unpack(MR.Colors.titlebarBg))
 
-    -- Title text
+    -- Title text — uppercase with letter spacing achieved via spaces.
+    -- The accent color makes it pop against the dark title bar.
     local title = bar:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
-    title:SetPoint("LEFT", bar, "LEFT", 12, 0)
-    title:SetText("MAILROOM")
-    title:SetTextColor(unpack(MR.Colors.textGold))
+    title:SetPoint("LEFT", bar, "LEFT", 14, 0)
+    title:SetText("M A I L R O O M")
+    title:SetTextColor(unpack(MR.Colors.accentCyan))
 
-    -- Make the title bar draggable
+    -- Make the title bar draggable so the player can reposition the window.
     bar:EnableMouse(true)
     bar:RegisterForDrag("LeftButton")
     bar:SetScript("OnDragStart", function() parent:StartMoving() end)
     bar:SetScript("OnDragStop", function() parent:StopMovingOrSizing() end)
 
-    -- Close button (top-right)
-    local closeBtn = CreateFrame("Button", nil, bar, "UIPanelCloseButton")
-    closeBtn:SetPoint("TOPRIGHT", bar, "TOPRIGHT", 2, 2)
+    -- Circular close button (top-right).
+    -- Built as a small dark circle with an "X" label. The circle is
+    -- achieved with a backdrop and rounded edge file at small size.
+    local closeBtn = CreateBackdropFrame("Button", nil, bar)
+    closeBtn:SetSize(CLOSE_BTN_SIZE, CLOSE_BTN_SIZE)
+    closeBtn:SetPoint("RIGHT", bar, "RIGHT", -10, 0)
+    closeBtn:SetBackdrop({
+        bgFile   = "Interface\\Buttons\\WHITE8X8",
+        edgeFile = "Interface\\Buttons\\WHITE8X8",
+        edgeSize = 1,
+        insets   = { left = 0, right = 0, top = 0, bottom = 0 },
+    })
+    closeBtn:SetBackdropColor(0.14, 0.14, 0.16, 1.0)
+    closeBtn:SetBackdropBorderColor(MR.Colors.borderDark[1], MR.Colors.borderDark[2],
+        MR.Colors.borderDark[3], MR.Colors.borderDark[4])
+
+    local closeX = closeBtn:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+    closeX:SetPoint("CENTER", closeBtn, "CENTER", 0, 0)
+    closeX:SetText("X")
+    closeX:SetTextColor(unpack(MR.Colors.textMuted))
+
+    closeBtn:SetScript("OnEnter", function(self)
+        closeX:SetTextColor(unpack(MR.Colors.textPrimary))
+        self:SetBackdropColor(0.20, 0.20, 0.22, 1.0)
+    end)
+    closeBtn:SetScript("OnLeave", function(self)
+        closeX:SetTextColor(unpack(MR.Colors.textMuted))
+        self:SetBackdropColor(0.14, 0.14, 0.16, 1.0)
+    end)
     closeBtn:SetScript("OnClick", function() parent:Hide() end)
 
     -- Separator line below the title bar
     local sep = bar:CreateTexture(nil, "ARTWORK")
-    sep:SetColorTexture(MR.Colors.borderGold[1], MR.Colors.borderGold[2],
-        MR.Colors.borderGold[3], 0.6)
+    sep:SetColorTexture(MR.Colors.borderDark[1], MR.Colors.borderDark[2],
+        MR.Colors.borderDark[3], 0.8)
     sep:SetPoint("BOTTOMLEFT", bar, "BOTTOMLEFT", 0, 0)
     sep:SetPoint("BOTTOMRIGHT", bar, "BOTTOMRIGHT", 0, 0)
     sep:SetHeight(1)
@@ -467,7 +613,8 @@ end
 
 -------------------------------------------------------------------------------
 -- Footer
--- Thin bar at the bottom with hint text and a Close button.
+-- Thin bar at the bottom with hint text on the left and a dark rounded
+-- Close button on the right.
 -------------------------------------------------------------------------------
 
 -- Builds the footer bar.
@@ -483,8 +630,8 @@ local function BuildFooter(parent)
 
     -- Separator line above the footer
     local sep = bar:CreateTexture(nil, "ARTWORK")
-    sep:SetColorTexture(MR.Colors.borderGold[1], MR.Colors.borderGold[2],
-        MR.Colors.borderGold[3], 0.6)
+    sep:SetColorTexture(MR.Colors.borderDark[1], MR.Colors.borderDark[2],
+        MR.Colors.borderDark[3], 0.8)
     sep:SetPoint("TOPLEFT", bar, "TOPLEFT", 0, 0)
     sep:SetPoint("TOPRIGHT", bar, "TOPRIGHT", 0, 0)
     sep:SetHeight(1)
@@ -492,14 +639,12 @@ local function BuildFooter(parent)
     -- Hint text
     local hint = bar:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
     hint:SetPoint("LEFT", bar, "LEFT", 12, 0)
-    hint:SetText("Settings apply immediately. /mr to toggle.")
-    hint:SetTextColor(unpack(MR.Colors.textMuted))
+    hint:SetText("Settings apply immediately  |  /mr to toggle")
+    hint:SetTextColor(unpack(MR.Colors.textDim))
 
-    -- Close button (bottom-right)
-    local closeBtn = CreateFrame("Button", nil, bar, "UIPanelButtonTemplate")
-    closeBtn:SetSize(70, 20)
+    -- Close button (bottom-right) — dark styled
+    local closeBtn = CreateDarkButton(bar, 70, 20, "Close")
     closeBtn:SetPoint("RIGHT", bar, "RIGHT", -8, 0)
-    closeBtn:SetText("Close")
     closeBtn:SetScript("OnClick", function() parent:Hide() end)
 
     return bar
@@ -519,11 +664,11 @@ local function BuildResizeGrip(parent)
     grip:SetPoint("BOTTOMRIGHT", parent, "BOTTOMRIGHT", -2, 2)
     grip:EnableMouse(true)
 
-    -- Visual indicator: small diagonal lines (using a simple texture)
+    -- Visual indicator: subtle diagonal marks
     local tex = grip:CreateTexture(nil, "OVERLAY")
     tex:SetAllPoints(grip)
-    tex:SetColorTexture(MR.Colors.borderGold[1], MR.Colors.borderGold[2],
-        MR.Colors.borderGold[3], 0.4)
+    tex:SetColorTexture(MR.Colors.borderDark[1], MR.Colors.borderDark[2],
+        MR.Colors.borderDark[3], 0.5)
 
     grip:SetScript("OnMouseDown", function(self, button)
         if button == "LeftButton" then
@@ -538,17 +683,18 @@ end
 -------------------------------------------------------------------------------
 -- Sidebar Navigation
 -- Left panel with category headers and clickable module items. Each item
--- shows a colored dot (green=enabled, brown=disabled) and highlights on
--- hover and selection.
+-- shows a colored dot (green=enabled, dark=disabled) and highlights on
+-- hover and selection. Selected item gets a left accent bar in cyan.
 -------------------------------------------------------------------------------
 
 -- Updates a nav item's dot color based on the module's enabled state.
+-- Modules without an enabledKey (Core, Profiles) always show green.
 -- @param def (table) The module definition from MODULE_DEFS.
 local function UpdateNavDot(def)
     local item = navItems[def.key]
     if not item or not item.dot then return end
 
-    -- Core and other modules without an enabledKey are always "on".
+    -- Core and Profiles have no enabledKey and are always "on".
     if not def.enabledKey then
         item.dot:SetColorTexture(unpack(MR.Colors.dotEnabled))
         return
@@ -563,20 +709,21 @@ local function UpdateNavDot(def)
 end
 
 -- Selects a module in the sidebar, showing its content panel and
--- updating visual state for all nav items.
+-- updating visual state for all nav items. The accent bar (left cyan
+-- strip) is shown only on the selected item.
 -- @param moduleKey (string) The key from MODULE_DEFS to select.
 local function SelectModule(moduleKey)
     selectedModule = moduleKey
 
-    -- Update all nav items: show accent bar only on selected
+    -- Update all nav items: show accent bar only on selected, dim others
     for key, item in pairs(navItems) do
         if key == moduleKey then
             item.accent:Show()
-            item.label:SetTextColor(unpack(MR.Colors.textGold))
+            item.label:SetTextColor(unpack(MR.Colors.textPrimary))
         else
             item.accent:Hide()
-            item.label:SetTextColor(MR.Colors.textGold[1], MR.Colors.textGold[2],
-                MR.Colors.textGold[3], 0.7)
+            item.label:SetTextColor(MR.Colors.textPrimary[1], MR.Colors.textPrimary[2],
+                MR.Colors.textPrimary[3], 0.6)
         end
     end
 
@@ -615,10 +762,10 @@ local function BuildSidebar(parent, titleBar, footer)
 
     CreateSolidBg(sidebar, unpack(MR.Colors.sidebarBg))
 
-    -- Right edge separator
+    -- Right edge separator — subtle dark line between sidebar and content
     local sep = sidebar:CreateTexture(nil, "ARTWORK")
-    sep:SetColorTexture(MR.Colors.borderGold[1], MR.Colors.borderGold[2],
-        MR.Colors.borderGold[3], 0.4)
+    sep:SetColorTexture(MR.Colors.borderDark[1], MR.Colors.borderDark[2],
+        MR.Colors.borderDark[3], 0.6)
     sep:SetPoint("TOPRIGHT", sidebar, "TOPRIGHT", 0, 0)
     sep:SetPoint("BOTTOMRIGHT", sidebar, "BOTTOMRIGHT", 0, 0)
     sep:SetWidth(1)
@@ -637,11 +784,11 @@ local function BuildSidebar(parent, titleBar, footer)
 
     -- Build category sections with their modules
     for _, category in ipairs(CATEGORY_ORDER) do
-        -- Category label
+        -- Category label — uppercase, muted, acts as a section header
         local catLabel = scrollChild:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
         catLabel:SetPoint("TOPLEFT", scrollChild, "TOPLEFT", 10, -yOffset)
         catLabel:SetText(category:upper())
-        catLabel:SetTextColor(unpack(MR.Colors.textMuted))
+        catLabel:SetTextColor(unpack(MR.Colors.textDim))
         yOffset = yOffset + CATEGORY_LABEL_H
 
         -- Module items in this category
@@ -651,36 +798,35 @@ local function BuildSidebar(parent, titleBar, footer)
                 itemBtn:SetSize(SIDEBAR_WIDTH - 16, NAV_ITEM_HEIGHT)
                 itemBtn:SetPoint("TOPLEFT", scrollChild, "TOPLEFT", 0, -yOffset)
 
-                -- Hover highlight
+                -- Hover highlight — very subtle lightening effect
                 local hoverBg = itemBtn:CreateTexture(nil, "BACKGROUND")
                 hoverBg:SetAllPoints(itemBtn)
-                hoverBg:SetColorTexture(MR.Colors.accentGold[1], MR.Colors.accentGold[2],
-                    MR.Colors.accentGold[3], 0.08)
+                hoverBg:SetColorTexture(1.0, 1.0, 1.0, 0.03)
                 hoverBg:Hide()
 
                 itemBtn:SetScript("OnEnter", function() hoverBg:Show() end)
                 itemBtn:SetScript("OnLeave", function() hoverBg:Hide() end)
 
-                -- Gold left accent bar (visible only when selected)
+                -- Left accent bar (accent cyan, visible only when selected)
                 local accent = itemBtn:CreateTexture(nil, "ARTWORK")
-                accent:SetColorTexture(unpack(MR.Colors.accentGold))
+                accent:SetColorTexture(unpack(MR.Colors.accentCyan))
                 accent:SetPoint("TOPLEFT", itemBtn, "TOPLEFT", 0, 0)
                 accent:SetPoint("BOTTOMLEFT", itemBtn, "BOTTOMLEFT", 0, 0)
                 accent:SetWidth(ACCENT_BAR_WIDTH)
                 accent:Hide()
 
-                -- Enabled/disabled dot
+                -- Enabled/disabled dot — 6px circle indicator
                 local dot = itemBtn:CreateTexture(nil, "ARTWORK")
                 dot:SetSize(NAV_DOT_SIZE, NAV_DOT_SIZE)
-                dot:SetPoint("LEFT", itemBtn, "LEFT", 10, 0)
+                dot:SetPoint("LEFT", itemBtn, "LEFT", 12, 0)
                 dot:SetColorTexture(unpack(MR.Colors.dotEnabled))
 
                 -- Module name label
                 local label = itemBtn:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
                 label:SetPoint("LEFT", dot, "RIGHT", 8, 0)
                 label:SetText(def.name)
-                label:SetTextColor(MR.Colors.textGold[1], MR.Colors.textGold[2],
-                    MR.Colors.textGold[3], 0.7)
+                label:SetTextColor(MR.Colors.textPrimary[1], MR.Colors.textPrimary[2],
+                    MR.Colors.textPrimary[3], 0.6)
 
                 -- Store references for later updates
                 navItems[def.key] = {
@@ -690,13 +836,13 @@ local function BuildSidebar(parent, titleBar, footer)
                     label  = label,
                 }
 
-                -- Click handler
+                -- Click handler — select this module
                 local moduleKey = def.key
                 itemBtn:SetScript("OnClick", function()
                     SelectModule(moduleKey)
                 end)
 
-                -- Set initial dot color
+                -- Set initial dot color based on current db state
                 UpdateNavDot(def)
 
                 yOffset = yOffset + NAV_ITEM_HEIGHT
@@ -714,45 +860,73 @@ local function BuildSidebar(parent, titleBar, footer)
 end
 
 -------------------------------------------------------------------------------
--- Master Toggle (Pill Shape)
--- A styled on/off toggle resembling a pill-shaped switch. Green when
--- enabled, dark brown when disabled. Used for module master toggles.
+-- Master Toggle (iOS-Style Pill)
+-- A styled on/off toggle resembling an iOS switch. Green track + white
+-- knob = enabled; dark track + gray knob = disabled. Used for module
+-- master toggles, positioned on the same line as the module name in the
+-- content panel header.
 -------------------------------------------------------------------------------
 
 -- Creates a pill-shaped master toggle button.
+-- The track is a rounded capsule built with BackdropTemplate using the
+-- tooltip edge file for soft rounded corners at small sizes. The knob
+-- is a circular highlight texture that slides left/right.
 -- @param parent (Frame) The parent frame to attach to.
 -- @param profileKey (string) The db.profile key this toggle controls.
 -- @param onChanged (function) Callback fired after the value changes.
 --        Receives the new boolean value as its argument.
--- @return (Frame) The toggle frame.
+-- @return (Frame) The toggle frame with a .Refresh() method.
 local function CreatePillToggle(parent, profileKey, onChanged)
     local pill = CreateFrame("Button", nil, parent)
     pill:SetSize(TOGGLE_PILL_W, TOGGLE_PILL_H)
 
-    -- Track background
-    local track = pill:CreateTexture(nil, "BACKGROUND")
-    track:SetAllPoints(pill)
+    -- Track background — rounded rectangle built from backdrop system.
+    -- The tooltip edge file provides soft rounded corners at the small
+    -- pill size, giving the iOS-style capsule appearance.
+    local trackBg = CreateBackdropFrame("Frame", nil, pill)
+    trackBg:SetAllPoints(pill)
+    trackBg:SetBackdrop({
+        bgFile   = "Interface\\Buttons\\WHITE8X8",
+        edgeFile = "Interface\\Tooltips\\UI-Tooltip-Border",
+        edgeSize = 14,
+        insets   = { left = 3, right = 3, top = 3, bottom = 3 },
+    })
+    trackBg:EnableMouse(false)
+    pill._trackBg = trackBg
 
-    -- Knob (the sliding circle)
-    local knob = pill:CreateTexture(nil, "ARTWORK")
-    knob:SetSize(TOGGLE_PILL_H - 4, TOGGLE_PILL_H - 4)
+    -- Knob — circular disc that slides between left (off) and right (on).
+    -- Uses TempPortraitAlphaMask which is a clean filled circle texture
+    -- available on all WoW clients.
+    local KNOB_SIZE = TOGGLE_PILL_H - 6
+    local knob = pill:CreateTexture(nil, "OVERLAY")
+    knob:SetSize(KNOB_SIZE, KNOB_SIZE)
+    knob:SetTexture("Interface\\CHARACTERFRAME\\TempPortraitAlphaMask")
+    pill._knob = knob
+
+    -- Hover highlight — subtle brightening on mouseover
+    pill:SetScript("OnEnter", function(self)
+        self._trackBg:SetAlpha(1.0)
+    end)
+    pill:SetScript("OnLeave", function(self)
+        self._trackBg:SetAlpha(0.85)
+    end)
 
     -- Updates the visual state of the pill to match the current db value.
+    -- Green track + white knob on right = enabled.
+    -- Dark track + gray knob on left = disabled.
     local function Refresh()
         local val = MR.Addon.db.profile[profileKey]
+        knob:ClearAllPoints()
         if val then
-            track:SetColorTexture(MR.Colors.dotEnabled[1], MR.Colors.dotEnabled[2],
-                MR.Colors.dotEnabled[3], 0.9)
-            knob:SetPoint("RIGHT", pill, "RIGHT", -2, 0)
-            knob:ClearAllPoints()
-            knob:SetPoint("RIGHT", pill, "RIGHT", -2, 0)
-            knob:SetColorTexture(0.85, 0.85, 0.85, 1.0)
+            trackBg:SetBackdropColor(0.20, 0.55, 0.20, 0.95)
+            trackBg:SetBackdropBorderColor(0.28, 0.65, 0.28, 0.7)
+            knob:SetPoint("RIGHT", pill, "RIGHT", -3, 0)
+            knob:SetVertexColor(0.95, 0.95, 0.95, 1.0)
         else
-            track:SetColorTexture(MR.Colors.dotDisabled[1], MR.Colors.dotDisabled[2],
-                MR.Colors.dotDisabled[3], 0.9)
-            knob:ClearAllPoints()
-            knob:SetPoint("LEFT", pill, "LEFT", 2, 0)
-            knob:SetColorTexture(0.55, 0.55, 0.55, 1.0)
+            trackBg:SetBackdropColor(0.12, 0.12, 0.14, 0.95)
+            trackBg:SetBackdropBorderColor(0.20, 0.20, 0.22, 0.7)
+            knob:SetPoint("LEFT", pill, "LEFT", 3, 0)
+            knob:SetVertexColor(0.40, 0.40, 0.42, 1.0)
         end
     end
 
@@ -778,7 +952,8 @@ end
 -- the content panel can loop over settings generically.
 -------------------------------------------------------------------------------
 
--- Creates a toggle (checkbox) setting row.
+-- Creates a toggle (styled checkbox) setting row.
+-- The checkbox uses an accent-colored checkmark when checked.
 -- @param parent (Frame) The content panel.
 -- @param settingDef (table) Setting definition from MODULE_DEFS.
 -- @param yOffset (number) Vertical offset from top of parent.
@@ -790,16 +965,22 @@ local function BuildToggleRow(parent, settingDef, yOffset, moduleDef)
     row:SetPoint("RIGHT", parent, "RIGHT", -CONTENT_PAD, 0)
     row:SetHeight(ROW_HEIGHT)
 
+    -- Subtle alternating row background for readability
+    local rowBg = row:CreateTexture(nil, "BACKGROUND")
+    rowBg:SetAllPoints(row)
+    rowBg:SetColorTexture(MR.Colors.rowBg[1], MR.Colors.rowBg[2],
+        MR.Colors.rowBg[3], 0.4)
+
     -- Label
     local label = row:CreateFontString(nil, "OVERLAY", "GameFontNormal")
-    label:SetPoint("LEFT", row, "LEFT", 0, 0)
+    label:SetPoint("LEFT", row, "LEFT", 8, 0)
     label:SetText(settingDef.name)
-    label:SetTextColor(unpack(MR.Colors.textGold))
+    label:SetTextColor(unpack(MR.Colors.textPrimary))
 
-    -- Checkbox
+    -- Styled checkbox — dark background with accent-colored checkmark
     local cb = CreateFrame("CheckButton", nil, row, "UICheckButtonTemplate")
-    cb:SetPoint("RIGHT", row, "RIGHT", 0, 0)
-    cb:SetSize(24, 24)
+    cb:SetPoint("RIGHT", row, "RIGHT", -4, 0)
+    cb:SetSize(22, 22)
 
     -- Read current value
     cb:SetChecked(MR.Addon.db.profile[settingDef.key] or false)
@@ -808,7 +989,7 @@ local function BuildToggleRow(parent, settingDef, yOffset, moduleDef)
         MR.Addon.db.profile[settingDef.key] = self:GetChecked() and true or false
     end)
 
-    -- Tooltip on the label
+    -- Tooltip on the label for discoverability
     if settingDef.desc then
         local lFrame = CreateFrame("Frame", nil, row)
         lFrame:SetAllPoints(label)
@@ -825,14 +1006,15 @@ local function BuildToggleRow(parent, settingDef, yOffset, moduleDef)
     end
 
     -- Store refresh function so we can update state when module toggle changes.
+    -- When the module master toggle is off, child settings are dimmed and disabled.
     row.Refresh = function()
         local disabled = moduleDef.enabledKey and not MR.Addon.db.profile[moduleDef.enabledKey]
         if disabled then
-            label:SetTextColor(MR.Colors.textMuted[1], MR.Colors.textMuted[2],
-                MR.Colors.textMuted[3], 0.5)
+            label:SetTextColor(MR.Colors.textDim[1], MR.Colors.textDim[2],
+                MR.Colors.textDim[3], 0.7)
             cb:Disable()
         else
-            label:SetTextColor(unpack(MR.Colors.textGold))
+            label:SetTextColor(unpack(MR.Colors.textPrimary))
             cb:Enable()
         end
         cb:SetChecked(MR.Addon.db.profile[settingDef.key] or false)
@@ -844,7 +1026,8 @@ local function BuildToggleRow(parent, settingDef, yOffset, moduleDef)
     return ROW_HEIGHT
 end
 
--- Creates a numeric stepper setting row with - and + buttons.
+-- Creates a numeric stepper setting row with dark - and + buttons
+-- flanking a centered value display.
 -- @param parent (Frame) The content panel.
 -- @param settingDef (table) Setting definition from MODULE_DEFS.
 -- @param yOffset (number) Vertical offset from top of parent.
@@ -856,21 +1039,26 @@ local function BuildRangeRow(parent, settingDef, yOffset, moduleDef)
     row:SetPoint("RIGHT", parent, "RIGHT", -CONTENT_PAD, 0)
     row:SetHeight(ROW_HEIGHT)
 
+    -- Subtle row background
+    local rowBg = row:CreateTexture(nil, "BACKGROUND")
+    rowBg:SetAllPoints(row)
+    rowBg:SetColorTexture(MR.Colors.rowBg[1], MR.Colors.rowBg[2],
+        MR.Colors.rowBg[3], 0.4)
+
     -- Label
     local label = row:CreateFontString(nil, "OVERLAY", "GameFontNormal")
-    label:SetPoint("LEFT", row, "LEFT", 0, 0)
+    label:SetPoint("LEFT", row, "LEFT", 8, 0)
     label:SetText(settingDef.name)
-    label:SetTextColor(unpack(MR.Colors.textGold))
+    label:SetTextColor(unpack(MR.Colors.textPrimary))
 
-    -- Value display
+    -- Value display — centered between the - and + buttons
     local valueText = row:CreateFontString(nil, "OVERLAY", "GameFontNormal")
-    valueText:SetPoint("RIGHT", row, "RIGHT", -STEPPER_BTN_SIZE - 4, 0)
     valueText:SetWidth(STEPPER_VALUE_W)
     valueText:SetJustifyH("CENTER")
-    valueText:SetTextColor(unpack(MR.Colors.textGold))
+    valueText:SetTextColor(unpack(MR.Colors.textPrimary))
 
-    -- Format the displayed value. We show one decimal for steps < 1,
-    -- otherwise integers.
+    -- Format the displayed value. We show two decimals for steps < 1
+    -- (e.g., throttle delay 0.15), otherwise integers.
     local function FormatValue(val)
         if settingDef.step and settingDef.step < 1 then
             return string.format("%.2f", val)
@@ -886,26 +1074,25 @@ local function BuildRangeRow(parent, settingDef, yOffset, moduleDef)
 
     RefreshValue()
 
-    -- Plus button
-    local plusBtn = CreateFrame("Button", nil, row, "UIPanelButtonTemplate")
-    plusBtn:SetSize(STEPPER_BTN_SIZE, STEPPER_BTN_SIZE)
-    plusBtn:SetPoint("RIGHT", row, "RIGHT", 0, 0)
-    plusBtn:SetText("+")
+    -- Plus button — dark rounded style
+    local plusBtn = CreateDarkButton(row, STEPPER_BTN_SIZE, STEPPER_BTN_SIZE, "+")
+    plusBtn:SetPoint("RIGHT", row, "RIGHT", -4, 0)
     plusBtn:SetScript("OnClick", function()
         local cur = MR.Addon.db.profile[settingDef.key]
         local step = settingDef.step or 1
         local newVal = math.min(cur + step, settingDef.max)
-        -- Round to avoid floating point drift
+        -- Round to avoid floating point drift when using fractional steps
         newVal = math.floor(newVal / step + 0.5) * step
         MR.Addon.db.profile[settingDef.key] = newVal
         RefreshValue()
     end)
 
-    -- Minus button
-    local minusBtn = CreateFrame("Button", nil, row, "UIPanelButtonTemplate")
-    minusBtn:SetSize(STEPPER_BTN_SIZE, STEPPER_BTN_SIZE)
+    -- Value text positioned between - and +
+    valueText:SetPoint("RIGHT", plusBtn, "LEFT", -4, 0)
+
+    -- Minus button — dark rounded style
+    local minusBtn = CreateDarkButton(row, STEPPER_BTN_SIZE, STEPPER_BTN_SIZE, "-")
     minusBtn:SetPoint("RIGHT", valueText, "LEFT", -4, 0)
-    minusBtn:SetText("-")
     minusBtn:SetScript("OnClick", function()
         local cur = MR.Addon.db.profile[settingDef.key]
         local step = settingDef.step or 1
@@ -933,19 +1120,19 @@ local function BuildRangeRow(parent, settingDef, yOffset, moduleDef)
         end)
     end
 
-    -- Refresh for disabled state
+    -- Refresh for disabled state — grays out controls when module is off
     row.Refresh = function()
         local disabled = moduleDef.enabledKey and not MR.Addon.db.profile[moduleDef.enabledKey]
         if disabled then
-            label:SetTextColor(MR.Colors.textMuted[1], MR.Colors.textMuted[2],
-                MR.Colors.textMuted[3], 0.5)
-            valueText:SetTextColor(MR.Colors.textMuted[1], MR.Colors.textMuted[2],
-                MR.Colors.textMuted[3], 0.5)
+            label:SetTextColor(MR.Colors.textDim[1], MR.Colors.textDim[2],
+                MR.Colors.textDim[3], 0.7)
+            valueText:SetTextColor(MR.Colors.textDim[1], MR.Colors.textDim[2],
+                MR.Colors.textDim[3], 0.7)
             plusBtn:Disable()
             minusBtn:Disable()
         else
-            label:SetTextColor(unpack(MR.Colors.textGold))
-            valueText:SetTextColor(unpack(MR.Colors.textGold))
+            label:SetTextColor(unpack(MR.Colors.textPrimary))
+            valueText:SetTextColor(unpack(MR.Colors.textPrimary))
             plusBtn:Enable()
             minusBtn:Enable()
         end
@@ -958,7 +1145,7 @@ local function BuildRangeRow(parent, settingDef, yOffset, moduleDef)
     return ROW_HEIGHT
 end
 
--- Creates a text input setting row.
+-- Creates a text input setting row with a dark-themed EditBox.
 -- @param parent (Frame) The content panel.
 -- @param settingDef (table) Setting definition from MODULE_DEFS.
 -- @param yOffset (number) Vertical offset from top of parent.
@@ -970,18 +1157,21 @@ local function BuildInputRow(parent, settingDef, yOffset, moduleDef)
     row:SetPoint("RIGHT", parent, "RIGHT", -CONTENT_PAD, 0)
     row:SetHeight(ROW_HEIGHT)
 
+    -- Subtle row background
+    local rowBg = row:CreateTexture(nil, "BACKGROUND")
+    rowBg:SetAllPoints(row)
+    rowBg:SetColorTexture(MR.Colors.rowBg[1], MR.Colors.rowBg[2],
+        MR.Colors.rowBg[3], 0.4)
+
     -- Label
     local label = row:CreateFontString(nil, "OVERLAY", "GameFontNormal")
-    label:SetPoint("LEFT", row, "LEFT", 0, 0)
+    label:SetPoint("LEFT", row, "LEFT", 8, 0)
     label:SetText(settingDef.name)
-    label:SetTextColor(unpack(MR.Colors.textGold))
+    label:SetTextColor(unpack(MR.Colors.textPrimary))
 
-    -- EditBox
-    local editBox = CreateFrame("EditBox", nil, row, "InputBoxTemplate")
-    editBox:SetSize(120, 20)
-    editBox:SetPoint("RIGHT", row, "RIGHT", -4, 0)
-    editBox:SetAutoFocus(false)
-    editBox:SetFontObject("GameFontNormalSmall")
+    -- Dark-themed EditBox
+    local editBox = CreateDarkEditBox(row, 140, 20)
+    editBox._container:SetPoint("RIGHT", row, "RIGHT", -4, 0)
     editBox:SetText(MR.Addon.db.profile[settingDef.key] or "")
 
     -- Commit on Enter or focus loss
@@ -1017,11 +1207,11 @@ local function BuildInputRow(parent, settingDef, yOffset, moduleDef)
     row.Refresh = function()
         local disabled = moduleDef.enabledKey and not MR.Addon.db.profile[moduleDef.enabledKey]
         if disabled then
-            label:SetTextColor(MR.Colors.textMuted[1], MR.Colors.textMuted[2],
-                MR.Colors.textMuted[3], 0.5)
+            label:SetTextColor(MR.Colors.textDim[1], MR.Colors.textDim[2],
+                MR.Colors.textDim[3], 0.7)
             editBox:Disable()
         else
-            label:SetTextColor(unpack(MR.Colors.textGold))
+            label:SetTextColor(unpack(MR.Colors.textPrimary))
             editBox:Enable()
         end
         editBox:SetText(MR.Addon.db.profile[settingDef.key] or "")
@@ -1034,10 +1224,394 @@ local function BuildInputRow(parent, settingDef, yOffset, moduleDef)
 end
 
 -------------------------------------------------------------------------------
+-- Profiles Panel Builder
+-- Custom-built panel for AceDB profile management. Unlike other modules,
+-- the Profiles panel does not use the data-driven settings system. It
+-- directly interfaces with AceDB's profile API to show a scrollable list
+-- of profiles with Switch, Delete, New, Copy, and Reset functionality.
+-------------------------------------------------------------------------------
+
+-- Rebuilds the profile list inside the scrollable area.
+-- Called on initial build and after any profile change (switch, create, delete).
+-- @param scrollChild (Frame) The scroll child frame to populate.
+-- @param panel (Frame) The parent content panel (for Refresh propagation).
+local function RefreshProfileList(scrollChild, panel)
+    -- Clear existing children by hiding and releasing them.
+    -- We recreate the list each time because profile lists are small
+    -- and the simplicity outweighs the cost of recreation.
+    local children = { scrollChild:GetChildren() }
+    for _, child in ipairs(children) do
+        child:Hide()
+        child:SetParent(nil)
+    end
+
+    local db = MR.Addon.db
+    local currentProfile = db:GetCurrentProfile()
+    local profiles = db:GetProfiles()
+
+    -- Sort profiles alphabetically for consistent display
+    table.sort(profiles)
+
+    local yOffset = 0
+    local PROFILE_ROW_HEIGHT = 30
+
+    for _, profileName in ipairs(profiles) do
+        local row = CreateBackdropFrame("Frame", nil, scrollChild)
+        row:SetPoint("TOPLEFT", scrollChild, "TOPLEFT", 0, -yOffset)
+        row:SetPoint("RIGHT", scrollChild, "RIGHT", 0, 0)
+        row:SetHeight(PROFILE_ROW_HEIGHT)
+
+        -- Row background
+        row:SetBackdrop({
+            bgFile   = "Interface\\Buttons\\WHITE8X8",
+            edgeFile = "Interface\\Buttons\\WHITE8X8",
+            edgeSize = 1,
+            insets   = { left = 0, right = 0, top = 0, bottom = 0 },
+        })
+        row:SetBackdropColor(MR.Colors.rowBg[1], MR.Colors.rowBg[2],
+            MR.Colors.rowBg[3], 0.6)
+        row:SetBackdropBorderColor(MR.Colors.borderDark[1], MR.Colors.borderDark[2],
+            MR.Colors.borderDark[3], 0.4)
+
+        local isActive = (profileName == currentProfile)
+
+        -- Profile name label
+        local nameLabel = row:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+        nameLabel:SetPoint("LEFT", row, "LEFT", 10, 0)
+        nameLabel:SetText(profileName)
+        if isActive then
+            nameLabel:SetTextColor(unpack(MR.Colors.accentCyan))
+        else
+            nameLabel:SetTextColor(unpack(MR.Colors.textPrimary))
+        end
+
+        -- "Active" badge — small green-tinted label shown on the current profile
+        if isActive then
+            local badge = CreateBackdropFrame("Frame", nil, row)
+            badge:SetSize(48, 16)
+            badge:SetPoint("LEFT", nameLabel, "RIGHT", 8, 0)
+            badge:SetBackdrop({
+                bgFile   = "Interface\\Buttons\\WHITE8X8",
+                edgeFile = "Interface\\Buttons\\WHITE8X8",
+                edgeSize = 1,
+                insets   = { left = 0, right = 0, top = 0, bottom = 0 },
+            })
+            badge:SetBackdropColor(MR.Colors.enabledBadge[1], MR.Colors.enabledBadge[2],
+                MR.Colors.enabledBadge[3], 1.0)
+            badge:SetBackdropBorderColor(MR.Colors.dotEnabled[1], MR.Colors.dotEnabled[2],
+                MR.Colors.dotEnabled[3], 0.5)
+
+            local badgeText = badge:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+            badgeText:SetPoint("CENTER", badge, "CENTER", 0, 0)
+            badgeText:SetText("Active")
+            badgeText:SetTextColor(unpack(MR.Colors.dotEnabled))
+        end
+
+        -- Delete button — disabled if this is the active profile or the
+        -- last remaining profile (AceDB requires at least one profile).
+        local deleteBtn = CreateDarkButton(row, 52, 18, "Delete")
+        deleteBtn:SetPoint("RIGHT", row, "RIGHT", -4, 0)
+        if isActive or #profiles <= 1 then
+            deleteBtn:Disable()
+            deleteBtn._label:SetTextColor(MR.Colors.textDim[1], MR.Colors.textDim[2],
+                MR.Colors.textDim[3], 0.5)
+        else
+            local pName = profileName
+            deleteBtn:SetScript("OnClick", function()
+                -- Confirmation popup before deleting a profile to prevent
+                -- accidental data loss.
+                StaticPopup_Show("MAILROOM_DELETE_PROFILE", pName)
+            end)
+        end
+
+        -- Switch button — hidden if this is already the active profile
+        if not isActive then
+            local switchBtn = CreateDarkButton(row, 52, 18, "Switch")
+            switchBtn:SetPoint("RIGHT", deleteBtn, "LEFT", -4, 0)
+            local pName = profileName
+            switchBtn:SetScript("OnClick", function()
+                db:SetProfile(pName)
+                RefreshProfileList(scrollChild, panel)
+                -- Refresh all panels and nav dots since profile data changed
+                if panel._refreshAll then
+                    panel._refreshAll()
+                end
+            end)
+        end
+
+        yOffset = yOffset + PROFILE_ROW_HEIGHT + 2
+    end
+
+    scrollChild:SetHeight(math.max(yOffset, 1))
+end
+
+-- Builds the full Profiles content panel with AceDB integration.
+-- This is a special-case builder called instead of the standard
+-- data-driven BuildContentPanel when the "profiles" module is selected.
+-- @param parent (Frame) The content container frame.
+-- @return (Frame) The profiles panel frame.
+BuildProfilesPanel = function(parent)
+    local panel = CreateFrame("Frame", nil, parent)
+    panel:SetPoint("TOPLEFT", parent, "TOPLEFT", 0, 0)
+    panel:SetPoint("BOTTOMRIGHT", parent, "BOTTOMRIGHT", 0, 0)
+    panel._settingRows = {}
+
+    local yOffset = CONTENT_PAD
+
+    ---------------------------------------------------------------------------
+    -- Header
+    ---------------------------------------------------------------------------
+
+    local nameText = panel:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
+    nameText:SetPoint("TOPLEFT", panel, "TOPLEFT", CONTENT_PAD, -yOffset)
+    nameText:SetText("Profiles")
+    nameText:SetTextColor(unpack(MR.Colors.accentCyan))
+
+    yOffset = yOffset + 22
+
+    local descText = panel:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+    descText:SetPoint("TOPLEFT", panel, "TOPLEFT", CONTENT_PAD, -yOffset)
+    descText:SetPoint("RIGHT", panel, "RIGHT", -CONTENT_PAD, 0)
+    descText:SetJustifyH("LEFT")
+    descText:SetText("Manage AceDB profiles. Switch, copy, create, or reset settings profiles.")
+    descText:SetTextColor(unpack(MR.Colors.textMuted))
+
+    yOffset = yOffset + 20
+
+    -- Horizontal rule
+    local hr = panel:CreateTexture(nil, "ARTWORK")
+    hr:SetColorTexture(MR.Colors.borderDark[1], MR.Colors.borderDark[2],
+        MR.Colors.borderDark[3], 0.6)
+    hr:SetPoint("TOPLEFT", panel, "TOPLEFT", CONTENT_PAD, -yOffset)
+    hr:SetPoint("RIGHT", panel, "RIGHT", -CONTENT_PAD, 0)
+    hr:SetHeight(1)
+
+    yOffset = yOffset + 12
+
+    ---------------------------------------------------------------------------
+    -- Active Profile Display
+    ---------------------------------------------------------------------------
+
+    local activeLabel = panel:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+    activeLabel:SetPoint("TOPLEFT", panel, "TOPLEFT", CONTENT_PAD, -yOffset)
+    activeLabel:SetText("Active Profile:")
+    activeLabel:SetTextColor(unpack(MR.Colors.textMuted))
+
+    local activeValue = panel:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+    activeValue:SetPoint("LEFT", activeLabel, "RIGHT", 8, 0)
+    activeValue:SetText(MR.Addon.db:GetCurrentProfile())
+    activeValue:SetTextColor(unpack(MR.Colors.accentCyan))
+
+    yOffset = yOffset + 24
+
+    ---------------------------------------------------------------------------
+    -- Action Buttons Row: New Profile, Copy From, Reset to Defaults
+    ---------------------------------------------------------------------------
+
+    local newBtn = CreateDarkButton(panel, 100, 22, "New Profile")
+    newBtn:SetPoint("TOPLEFT", panel, "TOPLEFT", CONTENT_PAD, -yOffset)
+    newBtn:SetScript("OnClick", function()
+        StaticPopup_Show("MAILROOM_NEW_PROFILE")
+    end)
+
+    local copyBtn = CreateDarkButton(panel, 100, 22, "Copy From...")
+    copyBtn:SetPoint("LEFT", newBtn, "RIGHT", 8, 0)
+    copyBtn:SetScript("OnClick", function()
+        StaticPopup_Show("MAILROOM_COPY_PROFILE")
+    end)
+
+    local resetBtn = CreateDarkButton(panel, 120, 22, "Reset to Defaults")
+    resetBtn:SetPoint("LEFT", copyBtn, "RIGHT", 8, 0)
+    resetBtn:SetScript("OnClick", function()
+        StaticPopup_Show("MAILROOM_RESET_PROFILE")
+    end)
+
+    yOffset = yOffset + 32
+
+    ---------------------------------------------------------------------------
+    -- Profile List (Scrollable)
+    ---------------------------------------------------------------------------
+
+    local listLabel = panel:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+    listLabel:SetPoint("TOPLEFT", panel, "TOPLEFT", CONTENT_PAD, -yOffset)
+    listLabel:SetText("Saved Profiles")
+    listLabel:SetTextColor(unpack(MR.Colors.textMuted))
+
+    yOffset = yOffset + 16
+
+    local scrollFrame = CreateFrame("ScrollFrame", nil, panel, "UIPanelScrollFrameTemplate")
+    scrollFrame:SetPoint("TOPLEFT", panel, "TOPLEFT", CONTENT_PAD, -yOffset)
+    scrollFrame:SetPoint("BOTTOMRIGHT", panel, "BOTTOMRIGHT", -(CONTENT_PAD + 16), CONTENT_PAD)
+
+    local scrollChild = CreateFrame("Frame", nil, scrollFrame)
+    scrollChild:SetWidth(1)
+    scrollFrame:SetScrollChild(scrollChild)
+
+    -- Wire up the scroll child width to match the scroll frame width.
+    -- OnSizeChanged fires when the parent panel resizes (e.g., window resize).
+    scrollFrame:SetScript("OnSizeChanged", function(self, width)
+        scrollChild:SetWidth(width)
+    end)
+
+    -- Store a refresh-all callback so profile switches can refresh the
+    -- entire settings window (nav dots, setting rows, etc.).
+    panel._refreshAll = function()
+        activeValue:SetText(MR.Addon.db:GetCurrentProfile())
+        for _, def in ipairs(MODULE_DEFS) do
+            UpdateNavDot(def)
+        end
+        for _, p in pairs(contentPanels) do
+            if p._settingRows then
+                for _, row in ipairs(p._settingRows) do
+                    if row.Refresh then row.Refresh() end
+                end
+            end
+            if p._pillToggle and p._pillToggle.Refresh then
+                p._pillToggle.Refresh()
+            end
+        end
+    end
+
+    -- Initial population of the profile list
+    RefreshProfileList(scrollChild, panel)
+
+    -- Store references so we can refresh from static popups
+    panel._scrollChild = scrollChild
+    panel._activeValue = activeValue
+
+    return panel
+end
+
+-------------------------------------------------------------------------------
+-- Static Popups for Profile Management
+-- Registered once at file load time. These dialogs handle confirmation
+-- and text input for creating, deleting, copying, and resetting profiles.
+-------------------------------------------------------------------------------
+
+StaticPopupDialogs["MAILROOM_NEW_PROFILE"] = {
+    text = "Enter a name for the new profile:",
+    button1 = "Create",
+    button2 = "Cancel",
+    hasEditBox = true,
+    maxLetters = 32,
+    OnAccept = function(self)
+        local name = self.editBox:GetText()
+        if name and name ~= "" then
+            MR.Addon.db:SetProfile(name)
+            -- Refresh the profiles panel if it exists
+            local panel = contentPanels["profiles"]
+            if panel and panel._scrollChild then
+                RefreshProfileList(panel._scrollChild, panel)
+                if panel._refreshAll then panel._refreshAll() end
+            end
+        end
+    end,
+    EditBoxOnEnterPressed = function(self)
+        local parent = self:GetParent()
+        local name = self:GetText()
+        if name and name ~= "" then
+            MR.Addon.db:SetProfile(name)
+            local panel = contentPanels["profiles"]
+            if panel and panel._scrollChild then
+                RefreshProfileList(panel._scrollChild, panel)
+                if panel._refreshAll then panel._refreshAll() end
+            end
+        end
+        parent:Hide()
+    end,
+    EditBoxOnEscapePressed = function(self)
+        self:GetParent():Hide()
+    end,
+    timeout = 0,
+    whileDead = true,
+    hideOnEscape = true,
+    preferredIndex = 3,
+}
+
+StaticPopupDialogs["MAILROOM_DELETE_PROFILE"] = {
+    text = "Delete profile \"%s\"? This cannot be undone.",
+    button1 = "Delete",
+    button2 = "Cancel",
+    OnAccept = function(self, profileName)
+        MR.Addon.db:DeleteProfile(profileName, true)
+        local panel = contentPanels["profiles"]
+        if panel and panel._scrollChild then
+            RefreshProfileList(panel._scrollChild, panel)
+            if panel._refreshAll then panel._refreshAll() end
+        end
+    end,
+    timeout = 0,
+    whileDead = true,
+    hideOnEscape = true,
+    preferredIndex = 3,
+}
+
+StaticPopupDialogs["MAILROOM_COPY_PROFILE"] = {
+    text = "Enter the name of the profile to copy settings from:",
+    button1 = "Copy",
+    button2 = "Cancel",
+    hasEditBox = true,
+    maxLetters = 32,
+    OnAccept = function(self)
+        local name = self.editBox:GetText()
+        if name and name ~= "" then
+            -- CopyProfile copies settings from the named profile into
+            -- the current profile, overwriting current settings.
+            MR.Addon.db:CopyProfile(name, true)
+            local panel = contentPanels["profiles"]
+            if panel and panel._scrollChild then
+                RefreshProfileList(panel._scrollChild, panel)
+                if panel._refreshAll then panel._refreshAll() end
+            end
+        end
+    end,
+    EditBoxOnEnterPressed = function(self)
+        local parent = self:GetParent()
+        local name = self:GetText()
+        if name and name ~= "" then
+            MR.Addon.db:CopyProfile(name, true)
+            local panel = contentPanels["profiles"]
+            if panel and panel._scrollChild then
+                RefreshProfileList(panel._scrollChild, panel)
+                if panel._refreshAll then panel._refreshAll() end
+            end
+        end
+        parent:Hide()
+    end,
+    EditBoxOnEscapePressed = function(self)
+        self:GetParent():Hide()
+    end,
+    timeout = 0,
+    whileDead = true,
+    hideOnEscape = true,
+    preferredIndex = 3,
+}
+
+StaticPopupDialogs["MAILROOM_RESET_PROFILE"] = {
+    text = "Reset the current profile to default values? This cannot be undone.",
+    button1 = "Reset",
+    button2 = "Cancel",
+    OnAccept = function()
+        MR.Addon.db:ResetProfile(false, true)
+        local panel = contentPanels["profiles"]
+        if panel and panel._scrollChild then
+            RefreshProfileList(panel._scrollChild, panel)
+            if panel._refreshAll then panel._refreshAll() end
+        end
+    end,
+    timeout = 0,
+    whileDead = true,
+    hideOnEscape = true,
+    preferredIndex = 3,
+}
+
+-------------------------------------------------------------------------------
 -- Content Panel Builder
 -- Creates the right-side panel for a single module. Contains the header
--- with name, description, and master toggle, followed by setting rows.
+-- with name (in accent color), description (muted), and master toggle
+-- pill (same line as name), followed by a horizontal rule and setting rows.
 -- Panels are created once and cached in contentPanels[].
+-- The Profiles module is a special case that uses BuildProfilesPanel.
 -------------------------------------------------------------------------------
 
 -- Forward-declared above SelectModule, defined here because it references
@@ -1045,6 +1619,11 @@ end
 -- @param def (table) A module definition from MODULE_DEFS.
 -- @return (Frame) The content panel frame.
 BuildContentPanel = function(def)
+    -- Profiles gets a completely custom panel instead of data-driven rows.
+    if def.key == "profiles" then
+        return BuildProfilesPanel(contentFrame)
+    end
+
     local panel = CreateFrame("Frame", nil, contentFrame)
     panel:SetPoint("TOPLEFT", contentFrame, "TOPLEFT", 0, 0)
     panel:SetPoint("BOTTOMRIGHT", contentFrame, "BOTTOMRIGHT", 0, 0)
@@ -1053,16 +1632,18 @@ BuildContentPanel = function(def)
     local yOffset = CONTENT_PAD
 
     ---------------------------------------------------------------------------
-    -- Header: module name, description, master toggle
+    -- Header: module name in accent color, description in muted, master toggle
     ---------------------------------------------------------------------------
 
-    -- Module name
+    -- Module name — larger font, accent cyan color
     local nameText = panel:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
     nameText:SetPoint("TOPLEFT", panel, "TOPLEFT", CONTENT_PAD, -yOffset)
     nameText:SetText(def.name)
-    nameText:SetTextColor(unpack(MR.Colors.textGold))
+    nameText:SetTextColor(unpack(MR.Colors.accentCyan))
 
-    -- Master toggle pill (only if the module has an enabledKey)
+    -- Master toggle pill (only if the module has an enabledKey).
+    -- Positioned on the same line as the module name, right-aligned.
+    -- This is the iOS-style pill toggle: green track = on, dark = off.
     local pillToggle = nil
     if def.enabledKey then
         pillToggle = CreatePillToggle(panel, def.enabledKey, function(newVal)
@@ -1073,25 +1654,30 @@ BuildContentPanel = function(def)
                 if row.Refresh then row.Refresh() end
             end
         end)
-        pillToggle:SetPoint("RIGHT", panel, "RIGHT", -CONTENT_PAD, -yOffset - 8)
+        -- Anchor the pill to the right side of the header, vertically
+        -- centered with the module name text.
+        pillToggle:SetPoint("RIGHT", panel, "RIGHT", -CONTENT_PAD, 0)
+        pillToggle:SetPoint("TOP", nameText, "TOP", 0, 2)
+        panel._pillToggle = pillToggle
     end
 
-    yOffset = yOffset + 20
+    yOffset = yOffset + 22
 
-    -- Description
+    -- Description — one-line summary in muted text color
     local descText = panel:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
     descText:SetPoint("TOPLEFT", panel, "TOPLEFT", CONTENT_PAD, -yOffset)
-    descText:SetPoint("RIGHT", panel, "RIGHT", -(CONTENT_PAD + TOGGLE_PILL_W + 10), 0)
+    descText:SetPoint("RIGHT", panel, "RIGHT",
+        -(CONTENT_PAD + (def.enabledKey and (TOGGLE_PILL_W + 10) or 0)), 0)
     descText:SetJustifyH("LEFT")
     descText:SetText(def.desc)
     descText:SetTextColor(unpack(MR.Colors.textMuted))
 
     yOffset = yOffset + 20
 
-    -- Horizontal rule below header
+    -- Horizontal rule below header — subtle dark border color
     local hr = panel:CreateTexture(nil, "ARTWORK")
-    hr:SetColorTexture(MR.Colors.borderGold[1], MR.Colors.borderGold[2],
-        MR.Colors.borderGold[3], 0.4)
+    hr:SetColorTexture(MR.Colors.borderDark[1], MR.Colors.borderDark[2],
+        MR.Colors.borderDark[3], 0.6)
     hr:SetPoint("TOPLEFT", panel, "TOPLEFT", CONTENT_PAD, -yOffset)
     hr:SetPoint("RIGHT", panel, "RIGHT", -CONTENT_PAD, 0)
     hr:SetHeight(1)
@@ -1107,7 +1693,7 @@ BuildContentPanel = function(def)
         local noSettings = panel:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
         noSettings:SetPoint("TOPLEFT", panel, "TOPLEFT", CONTENT_PAD, -yOffset)
         noSettings:SetText("No additional settings. Use the toggle above to enable or disable.")
-        noSettings:SetTextColor(unpack(MR.Colors.textMuted))
+        noSettings:SetTextColor(unpack(MR.Colors.textDim))
     else
         for _, settingDef in ipairs(def.settings) do
             local consumed = 0
@@ -1149,7 +1735,8 @@ end
 -------------------------------------------------------------------------------
 -- Window Assembly
 -- Wires all pieces together and pre-builds the sidebar. Content panels
--- are built lazily on first selection.
+-- are built lazily on first selection for efficiency, though we pre-build
+-- all of them for instant switching.
 -------------------------------------------------------------------------------
 
 -- Assembles the entire settings window. Called once on first show.
@@ -1163,7 +1750,8 @@ local function AssembleWindow()
     sidebarFrame = BuildSidebar(mainFrame, titleBar, footer)
     contentFrame = BuildContentContainer(mainFrame, sidebarFrame, titleBar, footer)
 
-    -- Pre-build all content panels so switching is instant.
+    -- Pre-build all content panels so switching between modules is instant.
+    -- The memory cost is negligible since panels are simple frame trees.
     for _, def in ipairs(MODULE_DEFS) do
         BuildContentPanel(def)
     end
@@ -1181,26 +1769,37 @@ end
 -------------------------------------------------------------------------------
 
 -- Shows the settings window. Builds it on first call.
+-- Refreshes all nav dots and content rows in case profile values changed
+-- while the window was closed (e.g., via slash commands or profile switch).
 function MR.Settings:Show()
     if not mainFrame then
         AssembleWindow()
     end
 
-    -- Refresh all nav dots and content rows in case profile values changed
-    -- while the window was closed (e.g., via slash commands).
+    -- Refresh all nav dots to reflect current enabled state
     for _, def in ipairs(MODULE_DEFS) do
         UpdateNavDot(def)
     end
+
+    -- Refresh all setting rows and pill toggles in all panels
     for _, panel in pairs(contentPanels) do
         if panel._settingRows then
             for _, row in ipairs(panel._settingRows) do
                 if row.Refresh then row.Refresh() end
             end
         end
-        -- Refresh pill toggles if present
-        if panel._pillToggle then
+        if panel._pillToggle and panel._pillToggle.Refresh then
             panel._pillToggle.Refresh()
         end
+    end
+
+    -- Refresh the profiles panel active profile display
+    local profilesPanel = contentPanels["profiles"]
+    if profilesPanel and profilesPanel._activeValue then
+        profilesPanel._activeValue:SetText(MR.Addon.db:GetCurrentProfile())
+    end
+    if profilesPanel and profilesPanel._scrollChild then
+        RefreshProfileList(profilesPanel._scrollChild, profilesPanel)
     end
 
     mainFrame:Show()
@@ -1224,8 +1823,9 @@ end
 
 -------------------------------------------------------------------------------
 -- Mail Frame Button
--- A small styled button anchored to the Blizzard MailFrame that opens
+-- A styled button anchored to the Blizzard MailFrame that opens
 -- the custom settings window. Created once on first MAIL_SHOW.
+-- Styled to match the dark theme with accent color hover state.
 -------------------------------------------------------------------------------
 
 local mailFrameButtonCreated = false
