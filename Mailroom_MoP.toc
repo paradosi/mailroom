@@ -1,0 +1,18 @@
+## Interface: 50401
+## Title: Mailroom
+## Notes: Fast, modern mail management.
+## Author: paradosi
+## Version: 0.1.0
+## X-License: MIT
+## SavedVariables: MailroomDB
+
+embeds.xml
+Core\Compat.lua
+Core\Mailroom.lua
+Core\MailQueue.lua
+Core\Inbox.lua
+Core\Send.lua
+Core\AltData.lua
+UI\MailFrame.lua
+UI\AddressBook.lua
+UI\Alerts.lua
